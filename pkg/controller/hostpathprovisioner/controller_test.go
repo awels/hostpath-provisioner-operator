@@ -34,12 +34,13 @@ import (
 	"kubevirt.io/hostpath-provisioner-operator/version"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 
 	conditions "github.com/openshift/custom-resource-status/conditions/v1"
 
 	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 )
 
@@ -53,7 +54,6 @@ var _ = Describe("Controller reconcile loop", func() {
 		cl client.Client
 		r  *ReconcileHostPathProvisioner
 	)
-
 	BeforeEach(func() {
 		watchNamespaceFunc = func() (string, error) {
 			return "test-namespace", nil
@@ -61,7 +61,6 @@ var _ = Describe("Controller reconcile loop", func() {
 		version.VersionStringFunc = func() (string, error) {
 			return versionString, nil
 		}
-
 		cr = &hppv1.HostPathProvisioner{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-name",
@@ -77,11 +76,16 @@ var _ = Describe("Controller reconcile loop", func() {
 		}
 	})
 
-	It("Should create new if none exist", func() {
+	table.DescribeTable("Should create new everything if nothing exist", func(disableCSI bool) {
+		cr.Spec.DisableCSI = disableCSI
 		createDeployedCr(cr)
-	})
+	},
+		table.Entry("Disable CSI", true),
+		table.Entry("Enable CSI", false),
+	)
 
-	It("Should fix a changed daemonSet", func() {
+	table.DescribeTable("Should fix a changed daemonSet", func(disableCSI bool) {
+		cr.Spec.DisableCSI = disableCSI
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      "test-name",
@@ -113,10 +117,18 @@ var _ = Describe("Controller reconcile loop", func() {
 		ds = &appsv1.DaemonSet{}
 		err = cl.Get(context.TODO(), dsNN, ds)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(ds.Spec.Template.Spec.Volumes[0].Name).To(Equal("pv-volume"))
-	})
+		if disableCSI {
+			Expect(ds.Spec.Template.Spec.Volumes[0].Name).To(Equal("pv-volume"))
+		} else {
+			Expect(ds.Spec.Template.Spec.Volumes[0].Name).To(Equal("csi-data-dir"))
+		}
+	},
+		table.Entry("Disable CSI", true),
+		table.Entry("Enable CSI", false),
+	)
 
-	It("Should fix a changed service account", func() {
+	table.DescribeTable("Should fix a changed service account", func(disableCSI bool) {
+		cr.Spec.DisableCSI = disableCSI
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      "test-name",
@@ -124,7 +136,7 @@ var _ = Describe("Controller reconcile loop", func() {
 			},
 		}
 		saNN := types.NamespacedName{
-			Name:      ControllerServiceAccountName,
+			Name:      ProvisionerServiceAccountName,
 			Namespace: "test-namespace",
 		}
 		cr, r, cl = createDeployedCr(cr)
@@ -149,17 +161,25 @@ var _ = Describe("Controller reconcile loop", func() {
 		err = cl.Get(context.TODO(), saNN, sa)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sa.ObjectMeta.Labels["k8s-app"]).To(Equal(MultiPurposeHostPathProvisionerName))
-	})
+	},
+		table.Entry("Disable CSI", true),
+		table.Entry("Enable CSI", false),
+	)
 
-	It("Should fix a changed ClusterRole", func() {
+	table.DescribeTable("Should fix a changed ClusterRole", func(disableCSI bool) {
+		cr.Spec.DisableCSI = disableCSI
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      "test-name",
 				Namespace: "test-namespace",
 			},
 		}
+		name := MultiPurposeHostPathProvisionerName
+		if !disableCSI {
+			name = ProvisionerServiceAccountName
+		}
 		croleNN := types.NamespacedName{
-			Name: MultiPurposeHostPathProvisionerName,
+			Name: name,
 		}
 		cr, r, cl = createDeployedCr(cr)
 		// Now modify the ClusterRole to something not desired.
@@ -185,9 +205,13 @@ var _ = Describe("Controller reconcile loop", func() {
 		err = cl.Get(context.TODO(), croleNN, crole)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(len(crole.Rules[1].Verbs)).To(Equal(4))
-	})
+	},
+		table.Entry("Disable CSI", true),
+		table.Entry("Enable CSI", false),
+	)
 
-	It("Should fix a changed ClusterRoleBinding", func() {
+	table.DescribeTable("Should fix a changed ClusterRoleBinding", func(disableCSI bool) {
+		cr.Spec.DisableCSI = disableCSI
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      "test-name",
@@ -195,7 +219,7 @@ var _ = Describe("Controller reconcile loop", func() {
 			},
 		}
 		crbNN := types.NamespacedName{
-			Name: MultiPurposeHostPathProvisionerName,
+			Name: ProvisionerServiceAccountName,
 		}
 		cr, r, cl = createDeployedCr(cr)
 
@@ -219,10 +243,14 @@ var _ = Describe("Controller reconcile loop", func() {
 		crb = &rbacv1.ClusterRoleBinding{}
 		err = cl.Get(context.TODO(), crbNN, crb)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(crb.Subjects[0].Name).To(Equal(ControllerServiceAccountName))
-	})
+		Expect(crb.Subjects[0].Name).To(Equal(ProvisionerServiceAccountName))
+	},
+		table.Entry("Disable CSI", true),
+		table.Entry("Enable CSI", false),
+	)
 
-	It("Should fix a changed SecurityContextConstraints", func() {
+	table.DescribeTable("Should fix a changed SecurityContextConstraints", func(disableCSI bool) {
+		cr.Spec.DisableCSI = disableCSI
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name:      "test-name",
@@ -254,7 +282,10 @@ var _ = Describe("Controller reconcile loop", func() {
 		err = cl.Get(context.TODO(), sccNN, scc)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(scc.AllowPrivilegedContainer).To(BeFalse())
-	})
+	},
+		table.Entry("Disable CSI", true),
+		table.Entry("Enable CSI", false),
+	)
 
 	It("Should requeue if watch namespaces returns error", func() {
 		watchNamespaceFunc = func() (string, error) {
@@ -460,7 +491,7 @@ var _ = Describe("Controller reconcile loop", func() {
 		err = r.client.List(context.TODO(), saList, &client.ListOptions{Namespace: "test-namespace"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(len(saList.Items)).To(Equal(1))
-		Expect(saList.Items[0].Name).To(Equal(ControllerServiceAccountName))
+		Expect(saList.Items[0].Name).To(Equal(ProvisionerServiceAccountName))
 	})
 
 	It("Should err when more than one CR", func() {
@@ -504,7 +535,7 @@ var _ = Describe("Controller reconcile loop", func() {
 		res, err := r.Reconcile(req)
 		Expect(err).To(HaveOccurred())
 		Expect(res.Requeue).To(BeFalse())
-		Expect(err.Error()).To(Equal("There should be a single hostpath provisioner, 2 items found"))
+		Expect(err.Error()).To(Equal("there should be a single hostpath provisioner, 2 items found"))
 	})
 
 	It("Should not requeue when CR is deleted", func() {
@@ -682,10 +713,17 @@ func createDeployedCr(cr *hppv1.HostPathProvisioner) (*hppv1.HostPathProvisioner
 	Expect(conditions.IsStatusConditionTrue(updatedCr.Status.Conditions, conditions.ConditionProgressing)).To(BeTrue())
 	Expect(conditions.IsStatusConditionTrue(updatedCr.Status.Conditions, conditions.ConditionDegraded)).To(BeFalse())
 	// Verify all the different objects are created.
-	verifyCreateDaemonSet(r.client)
+	verifyCreateDaemonSet(r.client, cr.Spec.DisableCSI)
 	verifyCreateServiceAccount(r.client)
-	verifyCreateClusterRole(r.client)
-	verifyCreateClusterRoleBinding(r.client)
+	if cr.Spec.DisableCSI {
+		verifyCreateClusterRole(r.client)
+		verifyCreateClusterRoleBinding(r.client)
+	} else {
+		verifyCreateCSIClusterRole(r.client)
+		verifyCreateClusterRoleBinding(r.client)
+		verifyCreateCSIRole(r.client)
+		verifyCreateCSIRoleBinding(r.client)
+	}
 	verifyCreateSCC(r.client)
 
 	// Now make the daemonSet available, and reconcile again.
@@ -718,7 +756,7 @@ func createDeployedCr(cr *hppv1.HostPathProvisioner) (*hppv1.HostPathProvisioner
 }
 
 // Verify all the proper values are set when creating the daemonset
-func verifyCreateDaemonSet(cl client.Client) {
+func verifyCreateDaemonSet(cl client.Client, disableCSI bool) {
 	ds := &appsv1.DaemonSet{}
 	nn := types.NamespacedName{
 		Name:      MultiPurposeHostPathProvisionerName,
@@ -727,24 +765,262 @@ func verifyCreateDaemonSet(cl client.Client) {
 	err := cl.Get(context.TODO(), nn, ds)
 	Expect(err).NotTo(HaveOccurred())
 	// Check Service Account
-	Expect(ds.Spec.Template.Spec.ServiceAccountName).To(Equal(ControllerServiceAccountName))
+	Expect(ds.Spec.Template.Spec.ServiceAccountName).To(Equal(ProvisionerServiceAccountName))
 	// Check container image
-	Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(ProvisionerImageDefault))
-	// Check use naming prefix
-	Expect(ds.Spec.Template.Spec.Containers[0].Env[0].Value).To(Equal("false"))
-	// Check directory
-	Expect(ds.Spec.Template.Spec.Containers[0].Env[2].Value).To(Equal("/tmp/test"))
+	if disableCSI {
+		Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(ProvisionerImageDefault))
+		// Check use naming prefix
+		Expect(ds.Spec.Template.Spec.Containers[0].Env[0].Value).To(Equal("false"))
+		// Check directory
+		Expect(ds.Spec.Template.Spec.Containers[0].Env[2].Value).To(Equal("/tmp/test"))
+	} else {
+		Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(CsiProvisionerImageDefault))
+	}
 }
 
 func verifyCreateServiceAccount(cl client.Client) {
 	sa := &corev1.ServiceAccount{}
 	nn := types.NamespacedName{
-		Name:      ControllerServiceAccountName,
+		Name:      ProvisionerServiceAccountName,
 		Namespace: "test-namespace",
 	}
 	err := cl.Get(context.TODO(), nn, sa)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(sa.ObjectMeta.Name).To(Equal(ControllerServiceAccountName))
+	Expect(sa.ObjectMeta.Name).To(Equal(ProvisionerServiceAccountName))
+}
+
+func verifyCreateCSIClusterRole(cl client.Client) {
+	crole := &rbacv1.ClusterRole{}
+	nn := types.NamespacedName{
+		Name: ProvisionerServiceAccountName,
+	}
+	err := cl.Get(context.TODO(), nn, crole)
+	Expect(err).NotTo(HaveOccurred())
+	expectedRules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"persistentvolumes",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"create",
+				"delete",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"persistentvolumeclaims",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"update",
+			},
+		},
+		{
+			APIGroups: []string{
+				"storage.k8s.io",
+			},
+			Resources: []string{
+				"storageclasses",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"events",
+			},
+			Verbs: []string{
+				"list",
+				"watch",
+				"create",
+				"patch",
+				"update",
+			},
+		},
+		{
+			APIGroups: []string{
+				"storage.k8s.io",
+			},
+			Resources: []string{
+				"csinodes",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"nodes",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+	}
+	Expect(crole.Rules).To(Equal(expectedRules))
+
+	crole = &rbacv1.ClusterRole{}
+	nn = types.NamespacedName{
+		Name: attacherName,
+	}
+	err = cl.Get(context.TODO(), nn, crole)
+	Expect(err).NotTo(HaveOccurred())
+	expectedRules = []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"persistentvolumes",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"patch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"storage.k8s.io",
+			},
+			Resources: []string{
+				"csinodes",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"storage.k8s.io",
+			},
+			Resources: []string{
+				"volumeattachments",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"patch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"storage.k8s.io",
+			},
+			Resources: []string{
+				"volumeattachments/status",
+			},
+			Verbs: []string{
+				"patch",
+			},
+		},
+	}
+	Expect(crole.Rules).To(Equal(expectedRules))
+
+	crole = &rbacv1.ClusterRole{}
+	nn = types.NamespacedName{
+		Name: healthCheckName,
+	}
+	err = cl.Get(context.TODO(), nn, crole)
+	Expect(err).NotTo(HaveOccurred())
+	expectedRules = []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"persistentvolumes",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"persistentvolumeclaims",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"nodes",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"pods",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"events",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"create",
+				"patch",
+			},
+		},
+	}
+	Expect(crole.Rules).To(Equal(expectedRules))
 }
 
 func verifyCreateClusterRole(cl client.Client) {
@@ -827,15 +1103,135 @@ func verifyCreateClusterRole(cl client.Client) {
 	Expect(crole.Rules).To(Equal(expectedRules))
 }
 
+func verifyCreateCSIRole(cl client.Client) {
+	role := &rbacv1.Role{}
+	nn := types.NamespacedName{
+		Name:      ProvisionerServiceAccountName,
+		Namespace: "test-namespace",
+	}
+	err := cl.Get(context.TODO(), nn, role)
+	Expect(err).NotTo(HaveOccurred())
+	expectedRules := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{
+				"coordination.k8s.io",
+			},
+			Resources: []string{
+				"leases",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"delete",
+				"update",
+				"create",
+			},
+		},
+		{
+			APIGroups: []string{
+				"storage.k8s.io",
+			},
+			Resources: []string{
+				"csistoragecapacities",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"delete",
+				"update",
+				"create",
+			},
+		},
+		{
+			APIGroups: []string{
+				"",
+			},
+			Resources: []string{
+				"pods",
+			},
+			Verbs: []string{
+				"get",
+			},
+		},
+	}
+	Expect(role.Rules).To(Equal(expectedRules))
+	role = &rbacv1.Role{}
+	nn = types.NamespacedName{
+		Name:      attacherName,
+		Namespace: "test-namespace",
+	}
+	err = cl.Get(context.TODO(), nn, role)
+	Expect(err).NotTo(HaveOccurred())
+	expectedRules = []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{
+				"coordination.k8s.io",
+			},
+			Resources: []string{
+				"leases",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"delete",
+				"update",
+				"create",
+			},
+		},
+	}
+	Expect(role.Rules).To(Equal(expectedRules))
+	role = &rbacv1.Role{}
+	nn = types.NamespacedName{
+		Name:      healthCheckName,
+		Namespace: "test-namespace",
+	}
+	err = cl.Get(context.TODO(), nn, role)
+	Expect(err).NotTo(HaveOccurred())
+	expectedRules = []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{
+				"coordination.k8s.io",
+			},
+			Resources: []string{
+				"leases",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+				"delete",
+				"update",
+				"create",
+			},
+		},
+	}
+	Expect(role.Rules).To(Equal(expectedRules))
+}
+
 func verifyCreateClusterRoleBinding(cl client.Client) {
 	crb := &rbacv1.ClusterRoleBinding{}
 	nn := types.NamespacedName{
-		Name: MultiPurposeHostPathProvisionerName,
+		Name: ProvisionerServiceAccountName,
 	}
 	err := cl.Get(context.TODO(), nn, crb)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(crb.Subjects[0].Name).To(Equal(ControllerServiceAccountName))
+	Expect(crb.Subjects[0].Name).To(Equal(ProvisionerServiceAccountName))
 	Expect(crb.Subjects[0].Namespace).To(Equal("test-namespace"))
+}
+
+func verifyCreateCSIRoleBinding(cl client.Client) {
+	rb := &rbacv1.RoleBinding{}
+	nn := types.NamespacedName{
+		Name:      ProvisionerServiceAccountName,
+		Namespace: "test-namespace",
+	}
+	err := cl.Get(context.TODO(), nn, rb)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(rb.Subjects[0].Name).To(Equal(ProvisionerServiceAccountName))
+	Expect(rb.Subjects[0].Namespace).To(Equal("test-namespace"))
 }
 
 func verifyCreateSCC(cl client.Client) {
@@ -874,7 +1270,7 @@ func verifyCreateSCC(cl client.Client) {
 		},
 		AllowHostDirVolumePlugin: true,
 		Users: []string{
-			fmt.Sprintf("system:serviceaccount:test-namespace:%s", ControllerServiceAccountName),
+			fmt.Sprintf("system:serviceaccount:test-namespace:%s", ProvisionerServiceAccountName),
 		},
 		Volumes: []secv1.FSType{
 			secv1.FSTypeHostPath,
